@@ -67,6 +67,10 @@ class LoRALoader:
 
         try:
             weights = dict(mx.load(lora_file, return_metadata=True)[0].items())
+            
+            # Normalize third-party keys (AIToolkit, Diffusers, XLabs) to standard format
+            from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
+            weights = LoRANormalizer.normalize(weights)
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             print(f"❌ Failed to load LoRA file: {e}")
             return
