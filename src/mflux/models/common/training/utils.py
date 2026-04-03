@@ -7,27 +7,28 @@ from contextlib import contextmanager
 
 from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALinear
 from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
+from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
 from mflux.models.common.training.lora.path_util import get_at_path
 
 
 class TrainingUtil:
     @staticmethod
-    def iter_assistant_loras(transformer) -> Iterator[LoRALinear]:
+    def iter_assistant_loras(transformer) -> Iterator[LoRALinear | LokrLinear]:
         for _, child in transformer.named_modules():
-            if isinstance(child, LoRALinear):
+            if isinstance(child, (LoRALinear, LokrLinear)):
                 if getattr(child, "_mflux_lora_role", None) == "assistant":
                     yield child
             elif isinstance(child, FusedLoRALinear):
-                for lora in child.loras:
-                    if getattr(lora, "_mflux_lora_role", None) == "assistant":
-                        yield lora
+                for adapter in child.loras:
+                    if getattr(adapter, "_mflux_lora_role", None) == "assistant":
+                        yield adapter
 
     @staticmethod
     @contextmanager
     def assistant_disabled(transformer):
-        saved_scales = [(lora, float(lora.scale)) for lora in TrainingUtil.iter_assistant_loras(transformer)]
-        for lora, _ in saved_scales:
-            lora.scale = 0.0
+        saved_scales = [(adapter, float(adapter.scale)) for adapter in TrainingUtil.iter_assistant_loras(transformer)]
+        for adapter, _ in saved_scales:
+            adapter.scale = 0.0
         try:
             yield
         finally:
@@ -35,18 +36,18 @@ class TrainingUtil:
                 mod.scale = s
 
     @staticmethod
-    def get_train_lora(transformer, module_path: str) -> LoRALinear:
+    def get_train_lora(transformer, module_path: str) -> LoRALinear | LokrLinear:
         current = get_at_path(transformer, module_path)
-        if isinstance(current, LoRALinear):
+        if isinstance(current, (LoRALinear, LokrLinear)):
             if getattr(current, "_mflux_lora_role", None) == "train":
                 return current
         elif isinstance(current, FusedLoRALinear):
-            for lora in current.loras:
-                if getattr(lora, "_mflux_lora_role", None) == "train":
-                    return lora
+            for adapter in current.loras:
+                if getattr(adapter, "_mflux_lora_role", None) == "train":
+                    return adapter
 
         raise ValueError(
-            f"Expected a trainable LoRA at '{module_path}' but found {type(current)} (or no train LoRA in fusion)."
+            f"Expected a trainable adapter at '{module_path}' but found {type(current)} (or no train adapter in fusion)."
         )
 
     @staticmethod

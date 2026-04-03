@@ -15,6 +15,16 @@ class LoRANormalizer:
             # However, we promised "Normalize lora.up, lora.down, lora_A, lora_B" in the plan.
             new_key = new_key.replace(".lora_A.", ".lora_down.")
             new_key = new_key.replace(".lora_B.", ".lora_up.")
+
+            # Lokr Standardization
+            new_key = new_key.replace(".lokr.w1.", ".lokr_w1.")
+            new_key = new_key.replace(".lokr.w2.", ".lokr_w2.")
+            new_key = new_key.replace(".lokr.w1_a.", ".lokr_w1_a.")
+            new_key = new_key.replace(".lokr.w1_b.", ".lokr_w1_b.")
+            new_key = new_key.replace(".lokr.w2_a.", ".lokr_w2_a.")
+            new_key = new_key.replace(".lokr.w2_b.", ".lokr_w2_b.")
+            new_key = new_key.replace(".lokr.t2.", ".lokr_t2.")
+            new_key = new_key.replace(".lokr.alpha", ".alpha")
             
             # Prefix Stripping
             if new_key.startswith("base_model.model."):

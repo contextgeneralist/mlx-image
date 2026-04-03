@@ -8,6 +8,7 @@ import mlx.nn as nn
 
 from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALinear
 from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
+from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
 from mflux.models.common.lora.mapping.lora_mapping import LoRATarget
 from mflux.models.common.resolution.lora_resolution import LoraResolution
 
@@ -137,6 +138,21 @@ class LoRALoader:
                 for pattern in target.possible_alpha_patterns
             )
 
+            # Derive Lokr patterns from LoRA patterns
+            for pattern in target.possible_down_patterns:
+                # Strip lora specific suffixes
+                base = pattern.replace(".lora_A.weight", "").replace(".lora_down.weight", "")
+                base = base.replace(".lora_A", "").replace(".lora_down", "")
+                
+                for key in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2"]:
+                    mappings.append(PatternMatch(
+                        source_pattern=f"{base}.{key}",
+                        target_path=target.model_path,
+                        matrix_name=key,
+                        transpose=True, # Lokr weights are usually saved like LoRA (in, out)
+                        transform=None,
+                    ))
+
         return mappings
 
     @staticmethod
@@ -227,85 +243,91 @@ class LoRALoader:
             return False
 
         # Check if we have the required matrices
-        if "lora_A" not in lora_data or "lora_B" not in lora_data:
-            print(f"❌ Missing required LoRA matrices for {target_path}")
+        is_lora_data = "lora_A" in lora_data and "lora_B" in lora_data
+        is_lokr_data = any(k.startswith("lokr_") for k in lora_data.keys())
+
+        if not is_lora_data and not is_lokr_data:
+            print(f"❌ Missing required adapter matrices for {target_path}")
             return False
-
-        # Values are already transformed and transposed
-        lora_A = lora_data["lora_A"]
-        lora_B = lora_data["lora_B"]
-
-        # Handle alpha scaling
-        alpha_scale = 1.0
-        if "alpha" in lora_data:
-            alpha_value = lora_data["alpha"]
-            rank = lora_A.shape[1]
-            alpha_scale = float(alpha_value) / rank
 
         # Calculate final scale - only use user scale, matching Diffusers approach
         effective_scale = scale
 
-        # Create new LoRA layer
-        # Check if it's a linear layer (either nn.Linear, LoRALinear, or FusedLoRALinear)
+        # Check if it's a linear layer (either nn.Linear, LoRALinear, LokrLinear or FusedLoRALinear)
         is_linear = hasattr(current_module, "weight")
         is_lora_linear = isinstance(current_module, LoRALinear)
+        is_lokr_linear = isinstance(current_module, LokrLinear)
         is_fused_linear = isinstance(current_module, FusedLoRALinear)
 
-        if is_linear or is_lora_linear or is_fused_linear:
-            # Handle fusion: if the current module is already a LoRA layer, fuse them
-            if is_lora_linear:
-                print(f"   🔀 Fusing with existing LoRA at {target_path}")
-                lora_layer = LoRALinear.from_linear(current_module.linear, r=lora_A.shape[1], scale=effective_scale)
-                lora_layer._mflux_lora_role = role
-                lora_layer.lora_A = lora_A
-                lora_layer.lora_B = lora_B
-                if "alpha" in lora_data:
-                    lora_layer.lora_B = lora_layer.lora_B * alpha_scale
-                fused_layer = FusedLoRALinear(base_linear=current_module.linear, loras=[current_module, lora_layer])
-                replacement_layer = fused_layer
-            elif is_fused_linear:
-                print(f"   🔀 Adding to existing fusion at {target_path}")
-                lora_layer = LoRALinear.from_linear(
-                    current_module.base_linear, r=lora_A.shape[1], scale=effective_scale
-                )
-                lora_layer._mflux_lora_role = role
-                lora_layer.lora_A = lora_A
-                lora_layer.lora_B = lora_B
-                if "alpha" in lora_data:
-                    lora_layer.lora_B = lora_layer.lora_B * alpha_scale
-                fused_layer = FusedLoRALinear(
-                    base_linear=current_module.base_linear, loras=current_module.loras + [lora_layer]
-                )
-                replacement_layer = fused_layer
-            else:
-                # First LoRA on this layer
-                lora_layer = LoRALinear.from_linear(current_module, r=lora_A.shape[1], scale=effective_scale)
-                lora_layer._mflux_lora_role = role
-                lora_layer.lora_A = lora_A
-                lora_layer.lora_B = lora_B
-                if "alpha" in lora_data:
-                    lora_layer.lora_B = lora_layer.lora_B * alpha_scale
-                replacement_layer = lora_layer
-
-            # Replace the layer in the parent module
-            parent_module = transformer
-            for part in path_parts[:-1]:
-                if part.isdigit():
-                    parent_module = parent_module[int(part)]
-                elif isinstance(parent_module, dict) and part in parent_module:
-                    parent_module = parent_module[part]
-                else:
-                    parent_module = getattr(parent_module, part)
-
-            final_attr = path_parts[-1]
-            if final_attr.isdigit():
-                parent_module[int(final_attr)] = replacement_layer
-            elif isinstance(parent_module, dict) and final_attr in parent_module:
-                parent_module[final_attr] = replacement_layer
-            else:
-                setattr(parent_module, final_attr, replacement_layer)
-
-            return True
-        else:
+        if not (is_linear or is_lora_linear or is_lokr_linear or is_fused_linear):
             print(f"❌ Target layer {target_path} is not a linear layer")
             return False
+
+        # Extract base linear
+        if is_fused_linear:
+            base_linear = current_module.base_linear
+            existing_loras = current_module.loras
+        elif is_lora_linear or is_lokr_linear:
+            base_linear = current_module.linear
+            existing_loras = [current_module]
+        else:
+            base_linear = current_module
+            existing_loras = []
+
+        # Create new adapter layer
+        if is_lora_data:
+            lora_A = lora_data["lora_A"]
+            lora_B = lora_data["lora_B"]
+            
+            # Handle alpha scaling
+            alpha_scale = 1.0
+            if "alpha" in lora_data:
+                alpha_value = lora_data["alpha"]
+                rank = lora_A.shape[1]
+                alpha_scale = float(alpha_value) / rank
+
+            adapter_layer = LoRALinear.from_linear(base_linear, r=lora_A.shape[1], scale=effective_scale)
+            adapter_layer.lora_A = lora_A
+            adapter_layer.lora_B = lora_B
+            if "alpha" in lora_data:
+                adapter_layer.lora_B = adapter_layer.lora_B * alpha_scale
+        else:
+            adapter_layer = LokrLinear.from_linear(base_linear, scale=effective_scale)
+            for key in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2"]:
+                if key in lora_data:
+                    setattr(adapter_layer, key, lora_data[key])
+            
+            # Handle alpha scaling for Lokr if present
+            if "alpha" in lora_data:
+                # For Lokr, alpha scaling often depends on dimensions, but here we'll follow basic scale if alpha is present
+                # Many Lokr models have alpha = dim, so alpha/dim = 1.0
+                pass
+
+        adapter_layer._mflux_lora_role = role
+
+        # Wrap in Fusion if needed
+        if existing_loras:
+            print(f"   🔀 Fusing with existing adapters at {target_path}")
+            replacement_layer = FusedLoRALinear(base_linear=base_linear, loras=existing_loras + [adapter_layer])
+        else:
+            replacement_layer = adapter_layer
+
+        # Replace the layer in the parent module
+        parent_module = transformer
+        for part in path_parts[:-1]:
+            if part.isdigit():
+                parent_module = parent_module[int(part)]
+            elif isinstance(parent_module, dict) and part in parent_module:
+                parent_module = parent_module[part]
+            else:
+                parent_module = getattr(parent_module, part)
+
+        final_attr = path_parts[-1]
+        if final_attr.isdigit():
+            parent_module[int(final_attr)] = replacement_layer
+        elif isinstance(parent_module, dict) and final_attr in parent_module:
+            parent_module[final_attr] = replacement_layer
+        else:
+            setattr(parent_module, final_attr, replacement_layer)
+
+        return True

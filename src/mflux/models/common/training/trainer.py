@@ -14,7 +14,9 @@ from tqdm import tqdm
 from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALinear
 from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
-from mflux.models.common.training.adapters.base import TrainingAdapter
+from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
+from mflux.models.common.training.state.training_spec import TrainingSpec
+
 from mflux.models.common.training.dataset.batch import Batch, DataItem
 from mflux.models.common.training.state.training_spec import TrainingSpec
 from mflux.models.common.training.state.training_state import TrainingState
@@ -163,14 +165,17 @@ class TrainingTrainer:
 
     @staticmethod
     def _unfreeze_lora_layers(module: nn.Module) -> None:
+        lokr_keys = ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2"]
         for _, child in module.named_modules():
-            if isinstance(child, LoRALinear):
+            if isinstance(child, (LoRALinear, LokrLinear)):
                 if getattr(child, "_mflux_lora_role", None) == "train":
-                    child.unfreeze(keys=["lora_A", "lora_B"], strict=False)
+                    keys = ["lora_A", "lora_B"] if isinstance(child, LoRALinear) else lokr_keys
+                    child.unfreeze(keys=keys, strict=False)
             elif isinstance(child, FusedLoRALinear):
-                for lora in child.loras:
-                    if getattr(lora, "_mflux_lora_role", None) == "train":
-                        lora.unfreeze(keys=["lora_A", "lora_B"], strict=False)
+                for adapter in child.loras:
+                    if getattr(adapter, "_mflux_lora_role", None) == "train":
+                        keys = ["lora_A", "lora_B"] if isinstance(adapter, LoRALinear) else lokr_keys
+                        adapter.unfreeze(keys=keys, strict=False)
 
     @staticmethod
     def _preview_dimensions(training_spec: TrainingSpec, *, preview_image: Path | None = None) -> tuple[int, int]:
