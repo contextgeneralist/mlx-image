@@ -70,13 +70,18 @@ class LokrLinear(nn.Module):
         # Delta W = w1 ⊗ w2
         # For linear layers: y = x (w1 ⊗ w2)^T
         delta_w = mx.kron(w1, w2)
-        
+
         # Ensure delta_w matches the expected shape (output_dims, input_dims)
         # LyCORIS/AIToolkit might need a transpose depending on how they were saved
-        if delta_w.shape != self.linear.weight.shape:
-             # Try to reshape or transpose if there's a mismatch
-             # In most cases, mx.kron(w1, w2) should result in (out, in)
-             pass
+        if delta_w.shape == self.linear.weight.shape:
+            # Correct shape (Out, In), use transposed for matmul: x @ W.T
+            lokr_out = mx.matmul(x, delta_w.T)
+        elif delta_w.shape == self.linear.weight.shape[::-1]:
+            # Swapped shape (In, Out), use directly: x @ W
+            lokr_out = mx.matmul(x, delta_w)
+        else:
+            # If it's still wrong, return base_out to prevent crash
+            return base_out
 
-        lokr_out = mx.matmul(x, delta_w.T)
         return base_out + self.scale * lokr_out
+

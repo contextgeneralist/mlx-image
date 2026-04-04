@@ -274,6 +274,57 @@ class LoRALoader:
             base_linear = current_module
             existing_loras = []
 
+        # Validate shapes before applying
+        if is_lora_data:
+            lora_A = lora_data["lora_A"]
+            lora_B = lora_data["lora_B"]
+            
+            # Check input dimension (lora_A.shape[0]) matches base linear input dimension
+            layer_in_dims = base_linear.weight.shape[1]
+            if isinstance(base_linear, nn.QuantizedLinear):
+                layer_in_dims *= 32 // base_linear.bits
+
+            if lora_A.shape[0] != layer_in_dims:
+                print(f"   ❌ Shape mismatch for {target_path}: LoRA input dims ({lora_A.shape[0]}) do not match layer input dims ({layer_in_dims})")
+                return False
+            
+            # Check output dimension (lora_B.shape[1]) matches base linear output dimension
+            layer_out_dims = base_linear.weight.shape[0]
+            if lora_B.shape[1] != layer_out_dims:
+                print(f"   ❌ Shape mismatch for {target_path}: LoRA output dims ({lora_B.shape[1]}) do not match layer output dims ({layer_out_dims})")
+                return False
+        
+        if is_lokr_data:
+            # For Lokr, we need to check if the Kronecker product will match the layer shape
+            # Delta W = w1 ⊗ w2
+            # For linear layers: y = x (w1 ⊗ w2)^T, so w1 ⊗ w2 shape must be (out, in)
+            
+            # 1. Compute W1
+            if "lokr_w1" in lora_data:
+                w1 = lora_data["lokr_w1"]
+            elif "lokr_w1_a" in lora_data and "lokr_w1_b" in lora_data:
+                w1 = mx.matmul(lora_data["lokr_w1_a"], lora_data["lokr_w1_b"])
+            else:
+                w1 = None
+
+            # 2. Compute W2
+            if "lokr_w2" in lora_data:
+                w2 = lora_data["lokr_w2"]
+            elif "lokr_w2_a" in lora_data and "lokr_w2_b" in lora_data:
+                w2 = mx.matmul(lora_data["lokr_w2_a"], lora_data["lokr_w2_b"])
+            else:
+                w2 = None
+            
+            if w1 is not None and w2 is not None:
+                delta_w_shape = (w1.shape[0] * w2.shape[0], w1.shape[1] * w2.shape[1])
+                layer_shape = base_linear.weight.shape
+                if isinstance(base_linear, nn.QuantizedLinear):
+                    layer_shape = (layer_shape[0], layer_shape[1] * (32 // base_linear.bits))
+
+                if delta_w_shape != layer_shape and delta_w_shape != layer_shape[::-1]:
+                    print(f"   ❌ Shape mismatch for {target_path}: LoKr shape {delta_w_shape} does not match layer shape {layer_shape}")
+                    return False
+
         # Create new adapter layer
         if is_lora_data:
             lora_A = lora_data["lora_A"]
