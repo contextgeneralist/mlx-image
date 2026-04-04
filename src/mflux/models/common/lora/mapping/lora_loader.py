@@ -20,6 +20,8 @@ class PatternMatch:
     matrix_name: str  # "lora_A", "lora_B", or "alpha"
     transpose: bool
     transform: Callable[[mx.array], mx.array] | None = None
+    up_transform: Callable[[mx.array], mx.array] | None = None
+    down_transform: Callable[[mx.array], mx.array] | None = None
 
 
 class LoRALoader:
@@ -150,7 +152,9 @@ class LoRALoader:
                         target_path=target.model_path,
                         matrix_name=key,
                         transpose=True, # Lokr weights are usually saved like LoRA (in, out)
-                        transform=None,
+                        transform=None, # Handled at reconstruction time
+                        up_transform=target.up_transform,
+                        down_transform=target.down_transform,
                     ))
 
         return mappings
@@ -184,20 +188,31 @@ class LoRALoader:
                 if block_idx is not None and "{block}" in target_path:
                     target_path = target_path.format(block=block_idx)
 
-                # Apply transform if specified
-                transformed_value = weight_value
-                if mapping.transform is not None:
-                    transformed_value = mapping.transform(weight_value)
-
-                # Apply transpose if needed
-                if mapping.transpose:
-                    transformed_value = transformed_value.T
-
                 # Store for this target
                 if target_path not in lora_data_by_target:
                     lora_data_by_target[target_path] = {}
 
-                lora_data_by_target[target_path][mapping.matrix_name] = transformed_value
+                # Handle transforms
+                if mapping.matrix_name.startswith("lokr_"):
+                    # For LoKr, we store the transforms separately to apply them to the reconstructed matrix
+                    if "up_transform" not in lora_data_by_target[target_path]:
+                        lora_data_by_target[target_path]["up_transform"] = mapping.up_transform
+                    if "down_transform" not in lora_data_by_target[target_path]:
+                        lora_data_by_target[target_path]["down_transform"] = mapping.down_transform
+                    
+                    # For LoKr, we also need to know if it should be transposed eventually
+                    lora_data_by_target[target_path]["transpose"] = mapping.transpose
+                    
+                    # Store raw value (do NOT transpose factors yet)
+                    lora_data_by_target[target_path][mapping.matrix_name] = weight_value
+                else:
+                    # Regular LoRA
+                    transformed_value = weight_value
+                    if mapping.transform is not None:
+                        transformed_value = mapping.transform(weight_value)
+                    if mapping.transpose:
+                        transformed_value = transformed_value.T
+                    lora_data_by_target[target_path][mapping.matrix_name] = transformed_value
 
         # Apply LoRA to each target
         for target_path, lora_data in lora_data_by_target.items():
@@ -296,8 +311,6 @@ class LoRALoader:
         
         if is_lokr_data:
             # For Lokr, we need to check if the Kronecker product will match the layer shape
-            # Delta W = w1 ⊗ w2
-            # For linear layers: y = x (w1 ⊗ w2)^T, so w1 ⊗ w2 shape must be (out, in)
             
             # 1. Compute W1
             if "lokr_w1" in lora_data:
@@ -316,14 +329,39 @@ class LoRALoader:
                 w2 = None
             
             if w1 is not None and w2 is not None:
-                delta_w_shape = (w1.shape[0] * w2.shape[0], w1.shape[1] * w2.shape[1])
+                # Reconstruct the full matrix
+                delta_w = mx.kron(w1, w2)
+                
                 layer_shape = base_linear.weight.shape
                 if isinstance(base_linear, nn.QuantizedLinear):
                     layer_shape = (layer_shape[0], layer_shape[1] * (32 // base_linear.bits))
 
+                # Some LoKr weights are saved such that kron(w1, w2) is (In, Out)
+                # while others are (Out, In). We handle this by checking against layer_shape.
+                if lora_data.get("transpose"):
+                    if delta_w.shape == layer_shape[::-1] and delta_w.shape != layer_shape:
+                        delta_w = delta_w.T
+
+                # Apply transforms to the full matrix
+                # Note: In mflux, up_transform applies to the output side (axis 0 of delta_w)
+                # and down_transform applies to the input side (axis 1 of delta_w).
+                if lora_data.get("up_transform"):
+                    delta_w = lora_data["up_transform"](delta_w)
+                
+                if lora_data.get("down_transform"):
+                    # Only apply down_transform if the shape doesn't match yet.
+                    # This prevents double-splitting when both transforms are set to the same logic.
+                    if delta_w.shape != layer_shape:
+                        # Apply to input dimension (axis 1) by transposing
+                        delta_w = lora_data["down_transform"](delta_w.T).T
+
+                delta_w_shape = delta_w.shape
                 if delta_w_shape != layer_shape and delta_w_shape != layer_shape[::-1]:
                     print(f"   ❌ Shape mismatch for {target_path}: LoKr shape {delta_w_shape} does not match layer shape {layer_shape}")
                     return False
+                
+                # Store the reconstructed matrix in the lora_data
+                lora_data["delta_w"] = delta_w
 
         # Create new adapter layer
         if is_lora_data:
@@ -344,14 +382,15 @@ class LoRALoader:
                 adapter_layer.lora_B = adapter_layer.lora_B * alpha_scale
         else:
             adapter_layer = LokrLinear.from_linear(base_linear, scale=effective_scale)
-            for key in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2"]:
-                if key in lora_data:
-                    setattr(adapter_layer, key, lora_data[key])
+            if "delta_w" in lora_data:
+                adapter_layer.delta_w = lora_data["delta_w"]
+            else:
+                for key in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2"]:
+                    if key in lora_data:
+                        setattr(adapter_layer, key, lora_data[key])
             
             # Handle alpha scaling for Lokr if present
             if "alpha" in lora_data:
-                # For Lokr, alpha scaling often depends on dimensions, but here we'll follow basic scale if alpha is present
-                # Many Lokr models have alpha = dim, so alpha/dim = 1.0
                 pass
 
         adapter_layer._mflux_lora_role = role

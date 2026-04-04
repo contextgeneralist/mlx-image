@@ -1,3 +1,5 @@
+import re
+
 class LoRANormalizer:
     @staticmethod
     def normalize(weights: dict) -> dict:
@@ -8,13 +10,11 @@ class LoRANormalizer:
             # Suffix Standardization
             new_key = new_key.replace(".lora.up.", ".lora_up.")
             new_key = new_key.replace(".lora.down.", ".lora_down.")
-            
-            # While AIToolkit often uses lora_A and lora_B, some diffusers use them too.
-            # We don't necessarily have to rename them to lora_down/lora_up since mflux mapping 
-            # supports lora_A/lora_B directly, but we can if we want to reduce patterns.
-            # However, we promised "Normalize lora.up, lora.down, lora_A, lora_B" in the plan.
             new_key = new_key.replace(".lora_A.", ".lora_down.")
             new_key = new_key.replace(".lora_B.", ".lora_up.")
+            
+            # PEFT/Diffusers suffix
+            new_key = new_key.replace(".default.weight", ".weight")
 
             # Lokr Standardization
             new_key = new_key.replace(".lokr.w1.", ".lokr_w1.")
@@ -27,35 +27,31 @@ class LoRANormalizer:
             new_key = new_key.replace(".lokr.alpha", ".alpha")
             
             # Prefix Stripping
-            if new_key.startswith("base_model.model."):
-                new_key = new_key[len("base_model.model."):]
-            if new_key.startswith("diffusion_model."):
-                new_key = new_key[len("diffusion_model."):]
-            if new_key.startswith("transformer."):
-                new_key = new_key[len("transformer."):]
+            prefixes_to_strip = [
+                "base_model.model.",
+                "diffusion_model.",
+                "transformer.",
+                "lora_unet_",
+            ]
+            for prefix in prefixes_to_strip:
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
 
-            # Block Translations
-            # AIToolkit / diffusers sometimes use "single_blocks" instead of "single_transformer_blocks"
-            new_key = new_key.replace("single_blocks", "single_transformer_blocks")
+            # Handle underscore-separated block naming (e.g., double_blocks_0_img_attn_qkv)
+            if "double_blocks_" in new_key:
+                new_key = re.sub(r"double_blocks_(\d+)_", r"double_blocks.\1.", new_key)
+            if "single_blocks_" in new_key:
+                new_key = re.sub(r"single_blocks_(\d+)_", r"single_blocks.\1.", new_key)
 
-            # AIToolkit Flux2 Edge Case (Translating double_blocks to single_transformer_blocks)
-            # AIToolkit trains Flux2 as if it has double blocks (img_attn) 
-            # mflux Flux2 uses single_transformer_blocks.attn.to_qkv_mlp_proj
-            if "double_blocks" in new_key and "img_attn.qkv" in new_key:
-                new_key = new_key.replace("double_blocks", "single_transformer_blocks")
-                new_key = new_key.replace("img_attn.qkv", "attn.to_qkv_mlp_proj")
-            
-            if "double_blocks" in new_key and "img_mlp.0" in new_key:
-                new_key = new_key.replace("double_blocks", "single_transformer_blocks")
-                new_key = new_key.replace("img_mlp.0", "ff.linear_in")
-            
-            if "double_blocks" in new_key and "img_mlp.2" in new_key:
-                new_key = new_key.replace("double_blocks", "single_transformer_blocks")
-                new_key = new_key.replace("img_mlp.2", "ff.linear_out")
-
-            if "double_blocks" in new_key and "img_attn.proj" in new_key:
-                new_key = new_key.replace("double_blocks", "single_transformer_blocks")
-                new_key = new_key.replace("img_attn.proj", "attn.to_out")
+            # AIToolkit / Kohya middle-underscore standardization
+            new_key = new_key.replace("img_attn_qkv", "img_attn.qkv")
+            new_key = new_key.replace("img_attn_proj", "img_attn.proj")
+            new_key = new_key.replace("txt_attn_qkv", "txt_attn.qkv")
+            new_key = new_key.replace("txt_attn_proj", "txt_attn.proj")
+            new_key = new_key.replace("img_mlp_0", "img_mlp.0")
+            new_key = new_key.replace("img_mlp_2", "img_mlp.2")
+            new_key = new_key.replace("txt_mlp_0", "txt_mlp.0")
+            new_key = new_key.replace("txt_mlp_2", "txt_mlp.2")
 
             normalized_weights[new_key] = value
         

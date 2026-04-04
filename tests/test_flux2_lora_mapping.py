@@ -70,9 +70,17 @@ class TestFlux2LoRAMapping:
         assert self._matched_keys(keys) == set(keys)
 
     def _matched_keys(self, keys: list[str]) -> set[str]:
+        from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
+        
+        # Use LoRANormalizer to standardize keys
+        weights = {key: None for key in keys}
+        normalized_weights = LoRANormalizer.normalize(weights)
+        normalized_to_original = {normalized_key: original_key for original_key, normalized_key in zip(keys, normalized_weights.keys())}
+        
         matched_keys: set[str] = set()
 
-        for key in keys:
+        for normalized_key in normalized_weights.keys():
+            original_key = normalized_to_original[normalized_key]
             for target in Flux2LoRAMapping.get_mapping():
                 pattern_groups = (
                     target.possible_up_patterns,
@@ -80,10 +88,10 @@ class TestFlux2LoRAMapping:
                     target.possible_alpha_patterns,
                 )
                 for patterns in pattern_groups:
-                    if any(LoRALoader._match_pattern(key, pattern) is not None for pattern in patterns):
-                        matched_keys.add(key)
+                    if any(LoRALoader._match_pattern(normalized_key, pattern) is not None for pattern in patterns):
+                        matched_keys.add(original_key)
                         break
-                if key in matched_keys:
+                if original_key in matched_keys:
                     break
 
         return matched_keys
