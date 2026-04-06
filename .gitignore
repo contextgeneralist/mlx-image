@@ -17,6 +17,7 @@
 !src/mflux/models/common/training/_example/train.json
 !tests/training/config/train.json
 tests/training/tmp/
+tests/local/
 
 *.egg-info
 
