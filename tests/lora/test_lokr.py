@@ -74,6 +74,65 @@ def test_lora_loader_lokr_pattern_generation():
     assert "test.down.lokr_w2" in lokr_patterns
     assert "test.down.lokr_w1_a" in lokr_patterns
 
+def test_lokr_loader_with_weight_suffix():
+    # Test that LoRALoader matches Lokr keys ending in .weight
+    class MockModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = nn.Linear(16, 16)
+            
+    model = MockModel()
+    
+    target = LoRATarget(
+        model_path="layer",
+        possible_up_patterns=["layer.lora_up.weight"],
+        possible_down_patterns=["layer.lora_down.weight"]
+    )
+    
+    # Simulating keys often found in third-party LoKR files
+    weights = {
+        "layer.lokr_w1.weight": mx.random.uniform(shape=(2, 2)),
+        "layer.lokr_w2.weight": mx.random.uniform(shape=(8, 8)),
+    }
+    
+    pattern_mappings = LoRALoader._build_pattern_mappings([target])
+    applied_count, matched_keys = LoRALoader._apply_lora_with_mapping(
+        model, weights, scale=1.0, pattern_mappings=pattern_mappings, role="test"
+    )
+    
+    assert applied_count == 1
+    assert "layer.lokr_w1.weight" in matched_keys
+    assert "layer.lokr_w2.weight" in matched_keys
+    assert isinstance(model.layer, LokrLinear)
+
+def test_lokr_normalizer_dot_notation():
+    # Test that LoRANormalizer handles dot notation for Lokr correctly
+    from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
+    
+    weights = {
+        "transformer.double_blocks.0.img_attn.qkv.lokr.w1.weight": mx.zeros((2, 2)),
+        "transformer.double_blocks.0.img_attn.qkv.lokr.w2": mx.zeros((8, 8)),
+    }
+    
+    normalized = LoRANormalizer.normalize(weights)
+    
+    # Should strip "transformer." and standardize ".lokr.w1." -> ".lokr_w1."
+    assert "double_blocks.0.img_attn.qkv.lokr_w1.weight" in normalized
+    assert "double_blocks.0.img_attn.qkv.lokr_w2" in normalized
+
+def test_lokr_normalizer_underscore_notation():
+    # Test that LoRANormalizer handles underscore notation for Lokr correctly
+    from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
+    
+    weights = {
+        "double_blocks.0.img_attn.qkv_lokr_w1": mx.zeros((2, 2)),
+    }
+    
+    normalized = LoRANormalizer.normalize(weights)
+    
+    # Should convert "qkv_lokr_w1" -> "qkv.lokr_w1"
+    assert "double_blocks.0.img_attn.qkv.lokr_w1" in normalized
+
 def test_apply_lokr_to_target():
     # Test _apply_lora_matrices_to_target with Lokr data
     class MockModel(nn.Module):
@@ -96,8 +155,9 @@ def test_apply_lokr_to_target():
     assert success
     assert isinstance(model.layer, LokrLinear)
     assert model.layer._mflux_lora_role == "test"
-    assert model.layer.lokr_w1 is not None
-    assert model.layer.lokr_w2 is not None
+    # The loader pre-computes the Kronecker product at load time
+    assert model.layer.delta_w is not None
+    assert model.layer.delta_w.shape == (16, 16)
 
 def test_fused_mixed_adapters():
     # Test FusedLoRALinear with both LoRA and Lokr

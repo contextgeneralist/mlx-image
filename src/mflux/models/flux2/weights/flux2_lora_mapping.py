@@ -127,18 +127,49 @@ class Flux2LoRAMapping(LoRAMapping):
         targets.extend([
             LoRATarget(
                 model_path="single_transformer_blocks.{block}.attn.to_qkv_mlp_proj",
-                possible_up_patterns=["single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_B.weight", "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_up.weight", "single_blocks.{block}.linear1.lora_B.weight", "single_blocks.{block}.linear1.lora_up.weight"],
-                possible_down_patterns=["single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_A.weight", "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_down.weight", "single_blocks.{block}.linear1.lora_A.weight", "single_blocks.{block}.linear1.lora_down.weight"],
-                possible_alpha_patterns=["single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.alpha", "single_blocks.{block}.linear1.alpha"],
-                up_transform=LoraTransforms.pad_klein9b_single_linear1_up,
-                down_transform=LoraTransforms.pad_klein9b_single_linear1_down,
+                possible_up_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_B.weight",
+                    "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_up.weight",
+                    # BFL format: normalizer converts single_blocks.N → single_transformer_blocks.N
+                    "single_transformer_blocks.{block}.linear1.lora_B.weight",
+                    "single_transformer_blocks.{block}.linear1.lora_up.weight",
+                ],
+                possible_down_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_A.weight",
+                    "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.lora_down.weight",
+                    # BFL format: normalizer converts single_blocks.N → single_transformer_blocks.N
+                    "single_transformer_blocks.{block}.linear1.lora_A.weight",
+                    "single_transformer_blocks.{block}.linear1.lora_down.weight",
+                ],
+                possible_alpha_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_qkv_mlp_proj.alpha",
+                    "single_transformer_blocks.{block}.linear1.alpha",
+                ],
+                up_transform=LoraTransforms.pad_flux2_single_linear1_up,
+                down_transform=LoraTransforms.pad_flux2_single_linear1_down,
             ),
             LoRATarget(
                 model_path="single_transformer_blocks.{block}.attn.to_out",
-                possible_up_patterns=["single_transformer_blocks.{block}.attn.to_out.lora_B.weight", "single_transformer_blocks.{block}.attn.to_out.lora_up.weight", "single_blocks.{block}.linear2.lora_B.weight", "single_blocks.{block}.linear2.lora_up.weight"],
-                possible_down_patterns=["single_transformer_blocks.{block}.attn.to_out.lora_A.weight", "single_transformer_blocks.{block}.attn.to_out.lora_down.weight", "single_blocks.{block}.linear2.lora_A.weight", "single_blocks.{block}.linear2.lora_down.weight"],
-                possible_alpha_patterns=["single_transformer_blocks.{block}.attn.to_out.alpha", "single_blocks.{block}.linear2.alpha"],
-                down_transform=LoraTransforms.pad_klein9b_single_linear2_down,
+                possible_up_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_out.lora_B.weight",
+                    "single_transformer_blocks.{block}.attn.to_out.lora_up.weight",
+                    # BFL format: normalizer converts single_blocks.N → single_transformer_blocks.N
+                    "single_transformer_blocks.{block}.linear2.lora_B.weight",
+                    "single_transformer_blocks.{block}.linear2.lora_up.weight",
+                ],
+                possible_down_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_out.lora_A.weight",
+                    "single_transformer_blocks.{block}.attn.to_out.lora_down.weight",
+                    # BFL format: normalizer converts single_blocks.N → single_transformer_blocks.N
+                    "single_transformer_blocks.{block}.linear2.lora_A.weight",
+                    "single_transformer_blocks.{block}.linear2.lora_down.weight",
+                ],
+                possible_alpha_patterns=[
+                    "single_transformer_blocks.{block}.attn.to_out.alpha",
+                    "single_transformer_blocks.{block}.linear2.alpha",
+                ],
+                up_transform=LoraTransforms.pad_flux2_single_linear2_up,
+                down_transform=LoraTransforms.pad_flux2_single_linear2_down,
             ),
         ])
 

@@ -19,24 +19,8 @@ class FusedLoRALinear(nn.Module):
             if isinstance(adapter, LoRALinear):
                 total_delta += adapter.scale * mx.matmul(mx.matmul(x, adapter.lora_A), adapter.lora_B)
             elif isinstance(adapter, LokrLinear):
-                # 1. Compute W1
-                if adapter.lokr_w1 is not None:
-                    w1 = adapter.lokr_w1
-                elif adapter.lokr_w1_a is not None and adapter.lokr_w1_b is not None:
-                    w1 = mx.matmul(adapter.lokr_w1_a, adapter.lokr_w1_b)
-                else:
-                    continue
-
-                # 2. Compute W2
-                if adapter.lokr_w2 is not None:
-                    w2 = adapter.lokr_w2
-                elif adapter.lokr_w2_a is not None and adapter.lokr_w2_b is not None:
-                    w2 = mx.matmul(adapter.lokr_w2_a, adapter.lokr_w2_b)
-                else:
-                    continue
-
-                # 3. Apply Kronecker Product delta
-                delta_w = mx.kron(w1, w2)
-                total_delta += adapter.scale * mx.matmul(x, delta_w.T)
+                # Delegate to the adapter's __call__ so delta_w and factor-based
+                # paths are handled consistently without duplicating logic here.
+                total_delta += adapter(x) - adapter.linear(x)
 
         return base_out + total_delta
