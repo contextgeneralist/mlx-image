@@ -92,24 +92,24 @@ class LoRASaver:
         if not hasattr(base_linear, "weight"):
             return
 
-        # 1. Compute W1
-        if lokr_layer.lokr_w1 is not None:
-            w1 = lokr_layer.lokr_w1
-        elif lokr_layer.lokr_w1_a is not None and lokr_layer.lokr_w1_b is not None:
-            w1 = mx.matmul(lokr_layer.lokr_w1_a, lokr_layer.lokr_w1_b)
+        if lokr_layer.delta_w is not None:
+            delta = lokr_layer.delta_w
         else:
-            return
+            from mflux.models.common.lora.layer.lokr_reconstruct import reconstruct_lokr_delta
+            delta, _ = reconstruct_lokr_delta(
+                lokr_w1=lokr_layer.lokr_w1,
+                lokr_w2=lokr_layer.lokr_w2,
+                lokr_w1_a=lokr_layer.lokr_w1_a,
+                lokr_w1_b=lokr_layer.lokr_w1_b,
+                lokr_w2_a=lokr_layer.lokr_w2_a,
+                lokr_w2_b=lokr_layer.lokr_w2_b,
+                lokr_t2=lokr_layer.lokr_t2,
+            )
 
-        # 2. Compute W2
-        if lokr_layer.lokr_w2 is not None:
-            w2 = lokr_layer.lokr_w2
-        elif lokr_layer.lokr_w2_a is not None and lokr_layer.lokr_w2_b is not None:
-            w2 = mx.matmul(lokr_layer.lokr_w2_a, lokr_layer.lokr_w2_b)
-        else:
+        if delta is None:
             return
 
         weight = base_linear.weight
-        delta = mx.kron(w1, w2)
         delta = lokr_layer.scale * delta
 
         if weight.shape != delta.shape:

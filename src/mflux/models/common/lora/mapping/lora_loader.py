@@ -10,10 +10,10 @@ from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALine
 from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
 from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
 from mflux.models.common.lora.mapping.lora_mapping import LoRATarget
+from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
 from mflux.models.common.resolution.lora_resolution import LoraResolution
 
-# All weight keys that can appear in a LoKr adapter file
-_LOKR_WEIGHT_KEYS = ("lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "lokr_t2", "dora_scale")
+from mflux.models.common.lora.layer.lokr_reconstruct import LOKR_WEIGHT_KEYS
 
 
 def _quantized_input_dims(linear: nn.Linear | nn.QuantizedLinear) -> int:
@@ -87,7 +87,6 @@ class LoRALoader:
             weights = dict(mx.load(lora_file, return_metadata=True)[0].items())
             
             # Normalize third-party keys (AIToolkit, Diffusers, XLabs) to standard format
-            from mflux.models.common.lora.mapping.lora_normalizer import LoRANormalizer
             weights = LoRANormalizer.normalize(weights)
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             print(f"❌ Failed to load LoRA file: {e}")
@@ -160,7 +159,7 @@ class LoRALoader:
                 base = pattern.replace(".lora_A.weight", "").replace(".lora_down.weight", "")
                 base = base.replace(".lora_A", "").replace(".lora_down", "")
 
-                for key in _LOKR_WEIGHT_KEYS:
+                for key in LOKR_WEIGHT_KEYS:
                     for suffix in ["", ".weight"]:
                         mappings.append(PatternMatch(
                             source_pattern=f"{base}.{key}{suffix}",
@@ -266,47 +265,15 @@ class LoRALoader:
         return float(val)
 
     @staticmethod
-    def _apply_lora_matrices_to_target(
-        transformer: nn.Module, target_path: str, lora_data: dict, scale: float, *, role: str | None
-    ) -> bool:
-        # Navigate to the target layer
-        current_module = transformer
-        path_parts = target_path.split(".")
-
-        try:
-            for part in path_parts:
-                if part.isdigit():
-                    current_module = current_module[int(part)]
-                elif isinstance(current_module, dict) and part in current_module:
-                    current_module = current_module[part]
-                else:
-                    current_module = getattr(current_module, part)
-        except (AttributeError, IndexError, KeyError):
-            print(f"❌ Could not find target path: {target_path}")
-            return False
-
-        # Check if we have the required matrices
-        is_lora_data = "lora_A" in lora_data and "lora_B" in lora_data
-        is_lokr_data = any(k.startswith("lokr_") for k in lora_data.keys())
-
-        if not is_lora_data and not is_lokr_data:
-            print(f"❌ Missing required adapter matrices for {target_path}")
-            return False
-
-        # Calculate final scale - only use user scale, matching Diffusers approach
-        effective_scale = scale
-
-        # Check if it's a linear layer (either nn.Linear, LoRALinear, LokrLinear or FusedLoRALinear)
+    def _resolve_target(current_module: Any) -> tuple[nn.Linear | nn.QuantizedLinear, list[LoRALinear | LokrLinear]] | None:
         is_linear = hasattr(current_module, "weight")
         is_lora_linear = isinstance(current_module, LoRALinear)
         is_lokr_linear = isinstance(current_module, LokrLinear)
         is_fused_linear = isinstance(current_module, FusedLoRALinear)
 
         if not (is_linear or is_lora_linear or is_lokr_linear or is_fused_linear):
-            print(f"❌ Target layer {target_path} is not a linear layer")
-            return False
+            return None
 
-        # Extract base linear
         if is_fused_linear:
             base_linear = current_module.base_linear
             existing_loras = current_module.loras
@@ -316,144 +283,123 @@ class LoRALoader:
         else:
             base_linear = current_module
             existing_loras = []
+        return base_linear, existing_loras
 
-        # Validate shapes before applying
-        if is_lora_data:
-            lora_A = lora_data["lora_A"]
-            lora_B = lora_data["lora_B"]
-            
-            # Check input dimension (lora_A.shape[0]) matches base linear input dimension
-            layer_in_dims = _quantized_input_dims(base_linear)
-            if lora_A.shape[0] != layer_in_dims:
-                print(f"   ❌ Shape mismatch for {target_path}: LoRA input dims ({lora_A.shape[0]}) do not match layer input dims ({layer_in_dims})")
-                return False
-            
-            # Check output dimension (lora_B.shape[1]) matches base linear output dimension
-            layer_out_dims = base_linear.weight.shape[0]
-            if lora_B.shape[1] != layer_out_dims:
-                print(f"   ❌ Shape mismatch for {target_path}: LoRA output dims ({lora_B.shape[1]}) do not match layer output dims ({layer_out_dims})")
-                return False
+    @staticmethod
+    def _create_lora_adapter(base_linear, lora_data, scale, target_path) -> LoRALinear | None:
+        lora_A = lora_data["lora_A"]
+        lora_B = lora_data["lora_B"]
         
-        if is_lokr_data:
-            # Reconstruct full weight matrix via Kronecker product
-            # 1. Reconstruct W2
-            rank = None
-            if "lokr_w2" in lora_data:
-                w2 = lora_data["lokr_w2"]
-            elif "lokr_w2_a" in lora_data and "lokr_w2_b" in lora_data:
-                if "lokr_t2" in lora_data:
-                    # Tucker decomposition: einsum("ijkl, jr, ip -> prkl", t2, w2_b, w2_a)
-                    w2 = mx.einsum("ijkl, jr, ip -> prkl", lora_data["lokr_t2"], lora_data["lokr_w2_b"], lora_data["lokr_w2_a"])
-                else:
-                    w2 = mx.matmul(lora_data["lokr_w2_a"], lora_data["lokr_w2_b"])
-                rank = lora_data["lokr_w2_b"].shape[0]
-            else:
-                w2 = None
+        layer_in_dims = _quantized_input_dims(base_linear)
+        if lora_A.shape[0] != layer_in_dims:
+            print(f"   ❌ Shape mismatch for {target_path}: LoRA input dims ({lora_A.shape[0]}) do not match layer input dims ({layer_in_dims})")
+            return None
+        
+        layer_out_dims = base_linear.weight.shape[0]
+        if lora_B.shape[1] != layer_out_dims:
+            print(f"   ❌ Shape mismatch for {target_path}: LoRA output dims ({lora_B.shape[1]}) do not match layer output dims ({layer_out_dims})")
+            return None
 
-            # 2. Reconstruct W1
-            if "lokr_w1" in lora_data:
-                w1 = lora_data["lokr_w1"]
-            elif "lokr_w1_a" in lora_data and "lokr_w1_b" in lora_data:
-                w1 = mx.matmul(lora_data["lokr_w1_a"], lora_data["lokr_w1_b"])
-                if rank is None:
-                    rank = lora_data["lokr_w1_b"].shape[0]
-            else:
-                w1 = None
+        alpha_scale = 1.0
+        if "alpha" in lora_data:
+            from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+            alpha_value = LoRALoader._extract_alpha(lora_data["alpha"])
+            rank = lora_A.shape[1]
+            alpha_scale = alpha_value / rank
 
-            if w1 is None or w2 is None:
-                print(f"   ❌ Missing LoKr factors for {target_path}: need lokr_w1 (or w1_a/w1_b) and lokr_w2 (or w2_a/w2_b)")
-                return False
+        adapter_layer = LoRALinear.from_linear(base_linear, r=lora_A.shape[1], scale=scale)
+        adapter_layer.lora_A = lora_A
+        adapter_layer.lora_B = lora_B * alpha_scale if "alpha" in lora_data else lora_B
+        return adapter_layer
 
-            # 3. Align dimensions for Conv layers
-            if len(w2.shape) == 4:
-                w1 = mx.expand_dims(mx.expand_dims(w1, 2), 3)
+    @staticmethod
+    def _create_lokr_adapter(base_linear, lora_data, scale, target_path) -> LokrLinear | None:
+        from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+        from mflux.models.common.lora.layer.lokr_reconstruct import reconstruct_lokr_delta
+        delta_w, rank = reconstruct_lokr_delta(
+            lokr_w1=lora_data.get("lokr_w1"), lokr_w2=lora_data.get("lokr_w2"),
+            lokr_w1_a=lora_data.get("lokr_w1_a"), lokr_w1_b=lora_data.get("lokr_w1_b"),
+            lokr_w2_a=lora_data.get("lokr_w2_a"), lokr_w2_b=lora_data.get("lokr_w2_b"),
+            lokr_t2=lora_data.get("lokr_t2"),
+        )
+        if delta_w is None:
+            print(f"   ❌ Missing LoKr factors for {target_path}: need lokr_w1 (or w1_a/w1_b) and lokr_w2 (or w2_a/w2_b)")
+            return None
 
-            # Reconstruct the full weight delta via Kronecker product
-            delta_w = mx.kron(w1, w2)
+        layer_shape = (base_linear.weight.shape[0], _quantized_input_dims(base_linear))
+        if delta_w.shape == layer_shape[::-1] and delta_w.shape != layer_shape:
+            delta_w = delta_w.T
 
-            layer_shape = (base_linear.weight.shape[0], _quantized_input_dims(base_linear))
+        if lora_data.get("up_transform"):
+            delta_w = lora_data["up_transform"](delta_w)
+        if lora_data.get("down_transform"):
+            delta_w = lora_data["down_transform"](delta_w)
 
-            # LoKr factors are generally stored such that kron(w1, w2) matches the weight matrix.
-            # We want delta_w to be (Out, In) before applying transforms (padding/splitting).
-            if delta_w.shape == layer_shape[::-1] and delta_w.shape != layer_shape:
-                delta_w = delta_w.T
+        delta_w_shape = delta_w.shape
+        if delta_w_shape != layer_shape and delta_w_shape != layer_shape[::-1]:
+            print(f"   ❌ Shape mismatch for {target_path}: LoKr shape {delta_w_shape} does not match layer shape {layer_shape}")
+            return None
 
-            # Apply transforms to the full reconstructed matrix.
-            # up_transform pads/slices the output dimension (axis 0).
-            # down_transform pads/slices the input dimension (axis 1).
-            if lora_data.get("up_transform"):
-                delta_w = lora_data["up_transform"](delta_w)
+        if delta_w.shape == layer_shape:
+            delta_w = delta_w.T
 
-            if lora_data.get("down_transform"):
-                delta_w = lora_data["down_transform"](delta_w)
+        if "alpha" in lora_data and rank is not None:
+            alpha_value = LoRALoader._extract_alpha(lora_data["alpha"])
+            delta_w = delta_w * (alpha_value / rank)
 
-            # Validate shape. It should now match either (Out, In) or (In, Out).
-            delta_w_shape = delta_w.shape
-            if delta_w_shape != layer_shape and delta_w_shape != layer_shape[::-1]:
-                print(f"   ❌ Shape mismatch for {target_path}: LoKr shape {delta_w_shape} does not match layer shape {layer_shape}")
-                return False
+        if "dora_scale" in lora_data:
+            print(f"   ⚠️  Warning: DoRA-LoKr is not fully supported for {target_path}; dora_scale is ignored.")
 
-            # Ensure final delta_w is in the expected orientation (In, Out) for LokrLinear's matmul(x, delta_w).
-            # If it's currently (Out, In), transpose it.
-            if delta_w.shape == layer_shape:
-                delta_w = delta_w.T
+        adapter_layer = LokrLinear.from_linear(base_linear, scale=scale)
+        adapter_layer.delta_w = delta_w
+        return adapter_layer
 
-            # Apply alpha scaling: scale = alpha / rank
-            if "alpha" in lora_data and rank is not None:
-                alpha_value = LoRALoader._extract_alpha(lora_data["alpha"])
-                delta_w = delta_w * (alpha_value / rank)
+    @staticmethod
+    def _apply_lora_matrices_to_target(
+        transformer: nn.Module,
+        target_path: str,
+        lora_data: dict,
+        scale: float,
+        *,
+        role: str | None,
+    ) -> bool:
+        from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+        from mflux.models.common.lora.path_util import get_at_path, set_at_path
 
-            if "dora_scale" in lora_data:
-                print(f"   ⚠️  Warning: DoRA-LoKr is not fully supported for {target_path}; dora_scale is ignored.")
+        try:
+            current_module = get_at_path(transformer, target_path)
+        except (AttributeError, IndexError, KeyError, ValueError):
+            print(f"❌ Could not find target path: {target_path}")
+            return False
 
-            lora_data["delta_w"] = delta_w
+        is_lora_data = "lora_A" in lora_data and "lora_B" in lora_data
+        is_lokr_data = any(k.startswith("lokr_") for k in lora_data.keys())
 
-        # Create new adapter layer
+        if not is_lora_data and not is_lokr_data:
+            print(f"❌ Missing required adapter matrices for {target_path}")
+            return False
+
+        resolved = LoRALoader._resolve_target(current_module)
+        if not resolved:
+            print(f"❌ Target layer {target_path} is not a linear layer")
+            return False
+        base_linear, existing_loras = resolved
+
         if is_lora_data:
-            lora_A = lora_data["lora_A"]
-            lora_B = lora_data["lora_B"]
-            
-            # Handle alpha scaling
-            alpha_scale = 1.0
-            if "alpha" in lora_data:
-                alpha_value = LoRALoader._extract_alpha(lora_data["alpha"])
-                rank = lora_A.shape[1]
-                alpha_scale = alpha_value / rank
-
-            adapter_layer = LoRALinear.from_linear(base_linear, r=lora_A.shape[1], scale=effective_scale)
-            adapter_layer.lora_A = lora_A
-            adapter_layer.lora_B = lora_B
-            if "alpha" in lora_data:
-                adapter_layer.lora_B = adapter_layer.lora_B * alpha_scale
+            adapter_layer = LoRALoader._create_lora_adapter(base_linear, lora_data, scale, target_path)
         else:
-            adapter_layer = LokrLinear.from_linear(base_linear, scale=effective_scale)
-            adapter_layer.delta_w = lora_data["delta_w"]
+            adapter_layer = LoRALoader._create_lokr_adapter(base_linear, lora_data, scale, target_path)
+
+        if adapter_layer is None:
+            return False
 
         adapter_layer._mflux_lora_role = role
 
-        # Wrap in Fusion if needed
         if existing_loras:
             print(f"   🔀 Fusing with existing adapters at {target_path}")
             replacement_layer = FusedLoRALinear(base_linear=base_linear, loras=existing_loras + [adapter_layer])
         else:
             replacement_layer = adapter_layer
 
-        # Replace the layer in the parent module
-        parent_module = transformer
-        for part in path_parts[:-1]:
-            if part.isdigit():
-                parent_module = parent_module[int(part)]
-            elif isinstance(parent_module, dict) and part in parent_module:
-                parent_module = parent_module[part]
-            else:
-                parent_module = getattr(parent_module, part)
-
-        final_attr = path_parts[-1]
-        if final_attr.isdigit():
-            parent_module[int(final_attr)] = replacement_layer
-        elif isinstance(parent_module, dict) and final_attr in parent_module:
-            parent_module[final_attr] = replacement_layer
-        else:
-            setattr(parent_module, final_attr, replacement_layer)
-
+        set_at_path(transformer, target_path, replacement_layer)
         return True

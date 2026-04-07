@@ -1,9 +1,8 @@
 import mlx.core as mx
 from mlx import nn
-import pytest
-from mflux.models.common.lora.mapping.lora_loader import LoRALoader
-from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
+
 from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
+from mflux.models.common.lora.mapping.lora_loader import LoRALoader
 
 
 def test_lora_shape_mismatch_validation(DummyTransformer):
@@ -88,7 +87,7 @@ def test_flux2_single_block_padding(DummyTransformer):
 
     assert success is True
     assert isinstance(transformer.layer, LokrLinear)
-    assert transformer.layer.delta_w.shape == (36864, 4096)
+    assert transformer.layer.delta_w.shape == (4096, 36864)
 
     x = mx.zeros((1, 4608, 4096))
     out = transformer.layer(x)

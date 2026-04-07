@@ -13,10 +13,9 @@ from tqdm import tqdm
 
 from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALinear
-from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
 from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
-from mflux.models.common.training.state.training_spec import TrainingSpec
-
+from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
+from mflux.models.common.training.adapters.base import TrainingAdapter
 from mflux.models.common.training.dataset.batch import Batch, DataItem
 from mflux.models.common.training.state.training_spec import TrainingSpec
 from mflux.models.common.training.state.training_state import TrainingState

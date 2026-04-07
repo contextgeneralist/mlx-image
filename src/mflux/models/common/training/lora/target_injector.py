@@ -5,13 +5,10 @@ from typing import Any
 import mlx.nn as nn
 
 from mflux.models.common.lora.layer.fused_linear_lora_layer import FusedLoRALinear
-from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
 from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
-from mflux.models.common.training.lora.path_util import (
-    expand_module_paths_from_targets,
-    get_at_path,
-    set_at_path,
-)
+from mflux.models.common.lora.layer.linear_lora_layer import LoRALinear
+from mflux.models.common.lora.path_util import get_at_path, set_at_path
+from mflux.models.common.training.lora.path_util import expand_module_paths_from_targets
 from mflux.models.common.training.state.training_spec import LoraTargetSpec
 
 

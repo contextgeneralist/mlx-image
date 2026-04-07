@@ -1,8 +1,9 @@
 import mlx.core as mx
-from mlx import nn
 import pytest
-from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+from mlx import nn
+
 from mflux.models.common.lora.layer.linear_lokr_layer import LokrLinear
+from mflux.models.common.lora.mapping.lora_loader import LoRALoader
 from mflux.models.common.lora.mapping.lora_mapping import LoRATarget
 from mflux.models.common.lora.mapping.lora_transforms import LoraTransforms
 
@@ -47,7 +48,7 @@ def test_lokr_loader_padding_integration(DummyTransformer):
 
     assert isinstance(transformer.layer, LokrLinear)
     # After padding, delta_w should match the 9B layer shape
-    assert transformer.layer.delta_w.shape == (36864, 4096)
+    assert transformer.layer.delta_w.shape == (4096, 36864)
 
     x = mx.zeros((1, 4608, 4096))
     out = transformer.layer(x)

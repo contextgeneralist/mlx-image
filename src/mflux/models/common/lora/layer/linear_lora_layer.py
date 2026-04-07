@@ -46,8 +46,11 @@ class LoRALinear(nn.Module):
             high=scale,
             shape=(r, output_dims),
         )
+        self._mflux_lora_role: str | None = None
+
+    def compute_delta(self, x):
+        lora_out = mx.matmul(mx.matmul(x, self.lora_A), self.lora_B)
+        return self.scale * lora_out
 
     def __call__(self, x):
-        base_out = self.linear(x)
-        lora_out = mx.matmul(mx.matmul(x, self.lora_A), self.lora_B)
-        return base_out + self.scale * lora_out
+        return self.linear(x) + self.compute_delta(x)
